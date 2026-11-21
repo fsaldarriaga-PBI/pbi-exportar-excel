@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <title>Exportar a Excel</title>
+  <!--
+    Genera un .xlsx en el navegador a partir de los datos que envía una medida DAX de Power BI.
+    Basado en https://github.com/juansuas/PowerBIDownload (generar-excel.html), con cambios:
+      - Los datos viajan en el fragmento (#...) y no en la query (?...): el navegador no los envía
+        al servidor, así que no quedan en sus logs ni chocan con su límite de longitud de URL (~8 KB).
+      - Se conservan tildes y ñ (la medida las codifica en UTF-8 en vez de eliminarlas).
+      - Tipos por columna (parámetro t): números y fechas llegan a Excel como valores reales.
+
+    Formato: exportar-excel.html#f=<archivo>&h=<hoja>&s=<notas>&t=<tipos>&d=<datos>
+      f  nombre del archivo, sin extensión
+      h  nombre de la hoja (opcional, máx. 31 caracteres; por defecto "Datos")
+      s  líneas de texto encima de la tabla, separadas por %0A (opcional; p. ej. filtros aplicados)
+      t  un código por columna separado por comas: s=texto, n=número (2 decimales),
+         i=entero, m=moneda ($, negativos en rojo), d=fecha ("yyyy-mm-dd" o "yyyy-mm-dd hh:nn"),
+         g=nivel de agrupación de la fila (0, 1, 2...; esa columna no se exporta y crea los +/- de Excel)
+      d  encabezados + filas; columnas separadas por TAB (%09) y filas por salto de línea (%0A)
+    Alternativa: exportar-excel.html#error=<mensaje> muestra el mensaje (p. ej. demasiadas filas).
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f6f8;
+      --card: #ffffff;
+      --text: #1f2933;
+      --muted: #52606d;
+      --accent: #1d6f42;
+      --error: #b42318;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #14181c;
+        --card: #1f252b;
+        --text: #e4e7eb;
+        --muted: #9aa5b1;
+        --accent: #4caf7d;
+        --error: #f97066;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .card {
+      width: 100%;
+      max-width: 520px;
+      background: var(--card);
+      border-radius: 12px;
+      padding: 32px 28px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+      text-align: center;
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 8px; }
+    p { margin: 0 0 16px; color: var(--muted); line-height: 1.45; }
+    .error h1 { color: var(--error); }
+    button {
+      font: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: var(--accent);
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 20px;
+      cursor: pointer;
+    }
+    button[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <main class="card" id="card">
+    <h1 id="titulo">Generando archivo…</h1>
+    <p id="mensaje">Preparando los datos para Excel.</p>
+    <button id="reintentar" type="button" hidden>Descargar de nuevo</button>
+  </main>
+
+  <script>
+    (function () {
+      var card = document.getElementById("card");
+      var titulo = document.getElementById("titulo");
+      var mensaje = document.getElementById("mensaje");
+      var boton = document.getElementById("reintentar");
+
+      function mostrarError(texto) {
+        card.classList.add("error");
+        titulo.textContent = "No se pudo generar el archivo";
+        mensaje.textContent = texto;
+      }
+
+      // Lee los parámetros del fragmento. Se separa solo en el primer "=" de cada par
+      // porque los datos vienen codificados (un "&" o "=" dentro de un valor llega como %26 / %3D).
+      function leerParametros() {
+        var params = {};
+        var hash = window.location.hash.replace(/^#/, "");
+        hash.split("&").forEach(function (par) {
+          var i = par.indexOf("=");
+          if (i > 0) params[par.slice(0, i)] = par.slice(i + 1);
+        });
+        return params;
+      }
+
+      function decodificar(valor) {
+        try {
+          return decodeURIComponent(valor || "");
+        } catch (e) {
+          // Algún "%" suelto: se decodifica por partes y lo inválido se deja tal cual.
+          return (valor || "").replace(/(%[0-9A-Fa-f]{2})+/g, function (m) {
+            try { return decodeURIComponent(m); } catch (e2) { return m; }
+          });
+        }
+      }
+
+      // Fecha "yyyy-mm-dd[ hh:nn[:ss]]" -> número de serie de Excel (sin desfase de zona horaria).
+      function aSerialExcel(texto) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(texto);
+        if (!m) return null;
+        var ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+        return ms / 86400000 + 25569;
+      }
+
+      function aNumero(texto) {
+        var limpio = texto.replace(/\s/g, "");
+        if (!/^-?\d+(\.\d+)?$/.test(limpio)) return null;
+        return Number(limpio);
+      }
+
+      function nombreArchivo(texto) {
+        var nombre = texto.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+        return (nombre || "datos").slice(0, 150);
+      }
+
+      function nombreHoja(texto) {
+        var nombre = texto.replace(/[\\/:*?\[\]]+/g, " ").replace(/\s+/g, " ").trim();
+        return (nombre || "Datos").slice(0, 31);
+      }
+
+      if (typeof XLSX === "undefined") {
+        mostrarError("No se pudo cargar la librería de Excel. Revisa tu conexión a internet e inténtalo de nuevo.");
+        return;
+      }
+
+      var params = leerParametros();
+      if (params.error) {
+        mostrarError(decodificar(params.error));
+        return;
+      }
+      var datos = decodificar(params.d);
+      var archivo = nombreArchivo(decodificar(params.f));
+      var hojaNombre = nombreHoja(decodificar(params.h));
+      var tipos = decodificar(params.t).split(",").map(function (t) { return t.trim(); });
+
+      var lineas = datos.split(/\r?\n/).filter(function (l) { return l.length > 0; });
+      if (lineas.length === 0) {
+        mostrarError("El enlace no trae datos. Vuelve al tablero y pulsa de nuevo el botón de descarga.");
+        return;
+      }
+
+      var encabezadosEntrada = lineas[0].split("\t");
+      var filasEntrada = lineas.slice(1).map(function (l) { return l.split("\t"); });
+
+      // La columna de tipo "g" no se exporta: indica el nivel de agrupación (+/-) de cada fila.
+      var colNivel = tipos.indexOf("g");
+      var columnas = [];
+      encabezadosEntrada.forEach(function (_, c) { if (c !== colNivel) columnas.push(c); });
+      var encabezados = columnas.map(function (c) { return encabezadosEntrada[c]; });
+      var tiposSalida = columnas.map(function (c) { return tipos[c]; });
+      var filas = filasEntrada.map(function (f) { return columnas.map(function (c) { return f[c] || ""; }); });
+      var niveles = filasEntrada.map(function (f) {
+        var n = colNivel >= 0 ? parseInt(f[colNivel], 10) : 0;
+        return isNaN(n) ? 0 : Math.max(0, Math.min(n, 7));
+      });
+
+      // Líneas opcionales encima de la tabla (parámetro s), p. ej. los filtros aplicados.
+      var notas = decodificar(params.s).split(/\r?\n/).filter(function (l) { return l.trim() !== ""; });
+      var filaEncabezado = notas.length > 0 ? notas.length + 1 : 0;
+
+      // Columnas de fecha: si algún valor trae hora distinta de 00:00 se muestra con hora.
+      var conHora = encabezados.map(function (_, c) {
+        return tiposSalida[c] === "d" && filas.some(function (f) {
+          return /[ T](?!00:00)\d{2}:\d{2}/.test(f[c]);
+        });
+      });
+
+      var hoja = XLSX.utils.aoa_to_sheet(notas.map(function (n) { return [n]; }).concat(notas.length ? [[]] : [], [encabezados]));
+      filas.forEach(function (fila, r) {
+        encabezados.forEach(function (_, c) {
+          var texto = fila[c].trim();
+          if (texto === "") return;
+          var celda = { t: "s", v: texto };
+          var tipo = tiposSalida[c];
+          if (tipo === "n" || tipo === "i" || tipo === "m") {
+            var num = aNumero(texto);
+            var formato = tipo === "i" ? "0" : tipo === "m" ? "\"$\"#,##0;[Red](\"$\"#,##0);\"$\"#,##0" : "#,##0.00";
+            if (num !== null) celda = { t: "n", v: num, z: formato };
+          } else if (tipo === "d") {
+            var serial = aSerialExcel(texto);
+            if (serial !== null) celda = { t: "n", v: serial, z: conHora[c] ? "dd/mm/yyyy hh:mm" : "dd/mm/yyyy" };
+          }
+          hoja[XLSX.utils.encode_cell({ r: filaEncabezado + r + 1, c: c })] = celda;
+        });
+      });
+
+      var rango = { s: { r: 0, c: 0 }, e: { r: filaEncabezado + filas.length, c: encabezados.length - 1 } };
+      hoja["!ref"] = XLSX.utils.encode_range(rango);
+      hoja["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: filaEncabezado, c: 0 }, e: rango.e }) };
+      hoja["!cols"] = encabezados.map(function (h, c) {
+        var ancho = h.length;
+        filas.forEach(function (f) { ancho = Math.max(ancho, f[c].length); });
+        return { wch: Math.min(Math.max(ancho + 2, 10), 60) };
+      });
+      if (colNivel >= 0) {
+        // Agrupación de filas como en una matriz de Power BI: el resumen va arriba del detalle.
+        hoja["!rows"] = [];
+        niveles.forEach(function (n, r) { if (n > 0) hoja["!rows"][filaEncabezado + r + 1] = { level: n }; });
+        hoja["!outline"] = { above: true };
+      }
+
+      var libro = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(libro, hoja, hojaNombre);
+
+      function descargar() {
+        XLSX.writeFile(libro, archivo + ".xlsx", { compression: true });
+      }
+
+      try {
+        descargar();
+      } catch (e) {
+        mostrarError("Ocurrió un error al crear el Excel: " + e.message);
+        return;
+      }
+
+      titulo.textContent = "Descarga lista";
+      mensaje.textContent = filas.length.toLocaleString("es-CO") + " filas exportadas a \"" + archivo +
+        ".xlsx\". Ya puedes cerrar esta pestaña.";
+      boton.hidden = false;
+      boton.addEventListener("click", descargar);
+    })();
+  </script>
+</body>
+</html>
