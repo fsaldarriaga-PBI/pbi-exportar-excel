@@ -9,7 +9,7 @@ Basado en [juansuas/PowerBIDownload](https://github.com/juansuas/PowerBIDownload
 Un botón de Power BI con acción **URL web** apunta a una medida que devuelve:
 
 ```
-https://fsaldarriaga-pbi.github.io/pbi-exportar-excel/exportar-excel.html#f=<archivo>&h=<hoja>&s=<notas>&t=<tipos>&d=<datos>
+https://fsaldarriaga-pbi.github.io/pbi-exportar-excel/exportar-excel.html#f=<archivo>&h=<hoja>&s=<notas>&e=<encabezado superior>&t=<tipos>&d=<datos>
 ```
 
 | Parámetro | Contenido |
@@ -17,7 +17,8 @@ https://fsaldarriaga-pbi.github.io/pbi-exportar-excel/exportar-excel.html#f=<arc
 | `f` | Nombre del archivo, sin extensión |
 | `h` | Nombre de la hoja (opcional) |
 | `s` | Líneas de texto encima de la tabla, separadas por `%0A` (opcional; por ejemplo, los filtros aplicados) |
-| `t` | Un tipo por columna, separados por coma: `s` texto, `n` número, `i` entero, `m` moneda (negativos en rojo), `d` fecha (`yyyy-mm-dd` o `yyyy-mm-dd hh:nn`), `g` nivel de agrupación de la fila (`0`, `1`, `2`…: esa columna no se exporta y crea los botones +/- de Excel, con el resumen arriba) |
+| `e` | Fila de encabezado superior, columnas separadas por `%09` (opcional); las celdas consecutivas con el mismo texto se combinan, por ejemplo un mes sobre sus columnas de valores |
+| `t` | Un tipo por columna, separados por coma: `s` texto, `n` número, `i` entero, `m` moneda (negativos en rojo), `p` porcentaje (`0.25` = 25 %), `d` fecha (`yyyy-mm-dd` o `yyyy-mm-dd hh:nn`), `g` nivel de agrupación de la fila (`0`, `1`, `2`…: esa columna no se exporta y crea los botones +/- de Excel, con el resumen arriba) |
 | `d` | Encabezados y filas; columnas separadas por `%09` y filas por `%0A` |
 
 Los datos van en el fragmento (`#`), que el navegador no envía al servidor: no quedan en registros ni chocan con límites de longitud del servidor. Este repositorio no contiene datos.

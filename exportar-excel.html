@@ -13,12 +13,15 @@
       - Se conservan tildes y ñ (la medida las codifica en UTF-8 en vez de eliminarlas).
       - Tipos por columna (parámetro t): números y fechas llegan a Excel como valores reales.
 
-    Formato: exportar-excel.html#f=<archivo>&h=<hoja>&s=<notas>&t=<tipos>&d=<datos>
+    Formato: exportar-excel.html#f=<archivo>&h=<hoja>&s=<notas>&e=<encabezado superior>&t=<tipos>&d=<datos>
       f  nombre del archivo, sin extensión
       h  nombre de la hoja (opcional, máx. 31 caracteres; por defecto "Datos")
       s  líneas de texto encima de la tabla, separadas por %0A (opcional; p. ej. filtros aplicados)
+      e  fila de encabezado superior, columnas separadas por %09 (opcional); las celdas
+         consecutivas con el mismo texto se combinan (p. ej. un mes sobre sus columnas de valores)
       t  un código por columna separado por comas: s=texto, n=número (2 decimales),
-         i=entero, m=moneda ($, negativos en rojo), d=fecha ("yyyy-mm-dd" o "yyyy-mm-dd hh:nn"),
+         i=entero, m=moneda ($, negativos en rojo), p=porcentaje (0.25 = 25,00 %),
+         d=fecha ("yyyy-mm-dd" o "yyyy-mm-dd hh:nn"),
          g=nivel de agrupación de la fila (0, 1, 2...; esa columna no se exporta y crea los +/- de Excel)
       d  encabezados + filas; columnas separadas por TAB (%09) y filas por salto de línea (%0A)
     Alternativa: exportar-excel.html#error=<mensaje> muestra el mensaje (p. ej. demasiadas filas).
@@ -185,7 +188,11 @@
 
       // Líneas opcionales encima de la tabla (parámetro s), p. ej. los filtros aplicados.
       var notas = decodificar(params.s).split(/\r?\n/).filter(function (l) { return l.trim() !== ""; });
-      var filaEncabezado = notas.length > 0 ? notas.length + 1 : 0;
+      // Encabezado superior opcional (parámetro e), p. ej. el mes encima de sus columnas de valores.
+      var superiorEntrada = params.e ? decodificar(params.e).split("\t") : null;
+      var superior = superiorEntrada ? columnas.map(function (c) { return superiorEntrada[c] || ""; }) : null;
+      var filasPrevias = notas.map(function (n) { return [n]; }).concat(notas.length ? [[]] : [], superior ? [superior] : []);
+      var filaEncabezado = filasPrevias.length;
 
       // Columnas de fecha: si algún valor trae hora distinta de 00:00 se muestra con hora.
       var conHora = encabezados.map(function (_, c) {
@@ -194,16 +201,26 @@
         });
       });
 
-      var hoja = XLSX.utils.aoa_to_sheet(notas.map(function (n) { return [n]; }).concat(notas.length ? [[]] : [], [encabezados]));
+      var hoja = XLSX.utils.aoa_to_sheet(filasPrevias.concat([encabezados]));
+      if (superior) {
+        // Combina las celdas consecutivas con el mismo texto (un mes sobre todas sus columnas).
+        hoja["!merges"] = [];
+        for (var c0 = 0; c0 < superior.length; ) {
+          var c1 = c0;
+          while (c1 + 1 < superior.length && superior[c1 + 1] === superior[c0]) c1++;
+          if (superior[c0] !== "" && c1 > c0) hoja["!merges"].push({ s: { r: filaEncabezado - 1, c: c0 }, e: { r: filaEncabezado - 1, c: c1 } });
+          c0 = c1 + 1;
+        }
+      }
       filas.forEach(function (fila, r) {
         encabezados.forEach(function (_, c) {
           var texto = fila[c].trim();
           if (texto === "") return;
           var celda = { t: "s", v: texto };
           var tipo = tiposSalida[c];
-          if (tipo === "n" || tipo === "i" || tipo === "m") {
+          if (tipo === "n" || tipo === "i" || tipo === "m" || tipo === "p") {
             var num = aNumero(texto);
-            var formato = tipo === "i" ? "0" : tipo === "m" ? "\"$\"#,##0;[Red](\"$\"#,##0);\"$\"#,##0" : "#,##0.00";
+            var formato = tipo === "i" ? "0" : tipo === "m" ? "\"$\"#,##0;[Red](\"$\"#,##0);\"$\"#,##0" : tipo === "p" ? "0.00%" : "#,##0.00";
             if (num !== null) celda = { t: "n", v: num, z: formato };
           } else if (tipo === "d") {
             var serial = aSerialExcel(texto);
